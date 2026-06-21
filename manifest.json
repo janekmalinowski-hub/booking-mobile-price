@@ -5,7 +5,7 @@
   "version_name": "1.0 (zweryfikowane na booking.com, Gdansk)",
   "description": "Sprawdza, czy ta sama oferta na Booking.com ma nizsza cene dla urzadzen mobilnych, i pokazuje roznice bezposrednio na stronie. Rozroznia sesje zalogowana (z Genius) i niezalogowana.",
   "author": "Jan Malinowski",
-  "homepage_url": "https://github.com/",
+  "homepage_url": "https://github.com/janekmalinowski-hub",
   "permissions": [
     "declarativeNetRequest",
     "tabs",
