@@ -75,7 +75,7 @@ function markProbeUrl(rawUrl) {
 // ---------------------------------------------------------------------------
 //  Glowny przeplyw: otworz zminimalizowane okno, odpytuj w petli, posprzataj.
 // ---------------------------------------------------------------------------
-async function probeMobilePrice(rawUrl, targetBlockId) {
+async function probeMobilePrice(rawUrl) {
   await enableMobileRule();
   const probeUrl = markProbeUrl(rawUrl);
 
@@ -121,7 +121,6 @@ async function probeMobilePrice(rawUrl, targetBlockId) {
     const state = {
       winId: winId,
       tabId: tabId,
-      targetBlockId: targetBlockId || null,
       polling: false,
       done: false,
       pollTimer: null,
@@ -176,14 +175,16 @@ function spoofNavigatorUA(ua) {
   } catch (e) {}
 }
 
-// Wykonywane w stronie: zamyka banner cookies i odczytuje najnizsza cene.
-// MOBILNA wersja Bookinga nie ma tabeli tr[data-block-id] — ceny siedza w
-// span.prco-valign-middle-helper. Plakietki "X zl taniej" (bui-badge__text) i
-// ceny przekreslone (js-strikethrough-price) IGNORUJEMY.
-function readPriceFromPage(targetBlockId) {
-  const MIN_PLN = 300;
-
-  // Zamknij banner zgody (rozne warianty selektorow).
+// ============================================================================
+//  detectMobileOffer — JEDYNE zadanie sondy: sprawdzic, czy na stronie jest
+//  oferta oznaczona jako "tylko dla urzadzen mobilnych".
+//
+//  Celowo NIE czytamy cen, pojemnosci, rabatow — to bylo zbyt kruche i Booking
+//  latwo to psul. Sprawdzamy jeden, stabilny fakt: obecnosc plakietki, ktora
+//  uzytkownik realnie widzi. Szukamy po tekscie (PL+EN) i po aria-label.
+// ============================================================================
+function detectMobileOffer() {
+  // Zamknij banner zgody (gdyby zaslanial tresc).
   try {
     const consentSel = [
       "#onetrust-accept-btn-handler",
@@ -197,109 +198,54 @@ function readPriceFromPage(targetBlockId) {
     }
   } catch (e) {}
 
-  function toAmount(text) {
-    if (!text) return null;
-    const m = text.replace(/\u00a0/g, " ").match(/(\d[\d  .]*)\s*(z[\u0142l]|PLN)?/);
-    if (!m) return null;
-    const d = m[1].replace(/[^\d]/g, "");
-    if (!d) return null;
-    const n = parseInt(d, 10);
-    return n >= MIN_PLN ? n : null;
-  }
+  // Wzorce tekstu plakietki (PL + EN, rozne warianty).
+  const patterns = [
+    /cena tylko dla urz\u0105dze\u0144 mobilnych/i,
+    /tylko dla urz\u0105dze\u0144 mobilnych/i,
+    /mobile[-\s]?only price/i,
+    /mobile[-\s]?only rate/i,
+    /mobile[-\s]?only deal/i,
+    /cena mobilna/i // dodatkowy wariant, jaki Booking bywa uzywa
+  ];
 
-  // Czy element jest cena przekreslona / plakietka rabatu? Jesli tak — pomijamy.
-  function isExcluded(el) {
-    let node = el;
-    for (let i = 0; i < 4 && node; i++) {
-      const c = (node.className || "").toString();
-      if (/strikethrough|bui-badge|sr-only|bui-u-sr-only/i.test(c)) return true;
-      node = node.parentElement;
-    }
+  function matchesAny(text) {
+    if (!text) return false;
+    for (const re of patterns) if (re.test(text)) return true;
     return false;
   }
 
-  // Wykrycie, czy sonda jest ZALOGOWANA (czy ceny zawieraja juz Genius).
-  // Sygnaly negatywne (niezalogowany): zacheta "Zaloguj sie, aby sprawdzic
-  // znizke Genius". Sygnaly pozytywne (zalogowany): zastosowany rabat Genius.
-  function detectLoggedIn() {
-    const txt = (document.body.innerText || "");
-    // Negatywny: strona prosi o zalogowanie dla Genius.
-    const promptsLogin = /Zaloguj si\u0119, aby sprawdzi\u0107|aby sprawdzi\u0107, czy obowi\u0105zuj|aby zobaczy\u0107 ceny Genius/i.test(txt);
-    // Pozytywny: rabat Genius juz zastosowany do ceny.
-    const geniusApplied = /Zastosowano\s+\d+%\s+zni\u017cki Genius|zni\u017cki Genius w odniesieniu/i.test(txt);
-    if (geniusApplied && !promptsLogin) return true;
-    if (promptsLogin) return false;
-    // Niejednoznaczne — zwroc null (panel pokaze ostrozny komunikat).
-    return null;
-  }
-
-  const loggedIn = detectLoggedIn();
-
-  // 1) Glowne zrodlo: span.prco-valign-middle-helper (realna cena oferty).
-  const priceSpans = Array.from(
-    document.querySelectorAll(
-      "span.prco-valign-middle-helper, [data-testid='price-and-discounted-price']"
-    )
+  // 1) Najpewniej: dedykowana plakietka badge.
+  const badges = document.querySelectorAll(
+    ".bui-badge, .bui-badge__text, [class*='badge'], [data-bui-component='Badge']"
   );
-
-  let best = null;
-  const seen = [];
-  for (const el of priceSpans) {
-    if (isExcluded(el)) continue;
-    const a = toAmount(el.textContent);
-    if (a != null) {
-      seen.push(a);
-      if (best === null || a < best) best = a;
+  for (const b of badges) {
+    if (matchesAny(b.textContent) || matchesAny(b.getAttribute && b.getAttribute("aria-label"))) {
+      return { mobileOffer: true, via: "badge", ua: navigator.userAgent };
     }
   }
 
-  if (best != null) {
-    return {
-      price: best,
-      blockId: null,
-      matched: false,
-      loggedIn: loggedIn,
-      mobileLabel: /tylko dla urz/i.test(document.body.innerText),
-      allPrices: seen,
-      ua: navigator.userAgent
-    };
+  // 2) Dowolny element z aria-label pasujacym do wzorca.
+  const labeled = document.querySelectorAll("[aria-label]");
+  for (const el of labeled) {
+    if (matchesAny(el.getAttribute("aria-label"))) {
+      return { mobileOffer: true, via: "aria", ua: navigator.userAgent };
+    }
   }
 
-  // --- DIAGNOSTYKA: nadal nic. Zbierz, co widac na stronie. ---
-  const diag = {
-    rows: document.querySelectorAll("tr[data-block-id]").length,
-    spans: priceSpans.length,
-    isMobileUA: /Mobile|Android/i.test(navigator.userAgent)
-  };
-  const moneyEls = [];
-  try {
-    const all = document.querySelectorAll("*");
-    for (let i = 0; i < all.length && moneyEls.length < 12; i++) {
-      const el = all[i];
-      if (el.children.length === 0) {
-        const t = (el.textContent || "").replace(/\u00a0/g, " ").trim();
-        if (/\d[\d  .]*\s*(z[\u0142l]|PLN)/i.test(t) && t.length < 40) {
-          moneyEls.push({
-            cls: (el.className || "").toString().slice(0, 60),
-            tag: el.tagName,
-            txt: t.slice(0, 30)
-          });
-        }
-      }
-    }
-  } catch (e) {}
-  diag.money = moneyEls;
-  diag.captcha = /captcha|jeste\u015b robotem|unusual traffic|px-captcha/i.test(
-    document.body.innerText.slice(0, 2000)
-  );
-  diag.title = (document.title || "").slice(0, 60);
+  // 3) Ostatecznosc: szukaj frazy w widocznym tekscie strony.
+  //    (Ograniczamy do rozsadnej dlugosci, zeby nie skanowac w nieskonczonosc.)
+  const bodyText = (document.body && document.body.innerText) ? document.body.innerText : "";
+  if (matchesAny(bodyText)) {
+    return { mobileOffer: true, via: "text", ua: navigator.userAgent };
+  }
 
-  return { price: null, blockId: null, matched: false, ua: navigator.userAgent, diag: diag };
+  // Sprawdzmy tez, czy strona w ogole sie zaladowala z oferta (sa ceny/pokoje),
+  // zeby odroznic "brak oferty mobilnej" od "strona jeszcze sie laduje".
+  const hasContent =
+    document.querySelectorAll("tr[data-block-id], [data-testid='room-card'], [data-room-id], span.prco-valign-middle-helper").length > 0;
+
+  return { mobileOffer: false, loaded: hasContent, ua: navigator.userAgent };
 }
-
-// ---------------------------------------------------------------------------
-//  Petla odpytywania: wola readPriceFromPage co POLL_MS az do skutku/deadline.
-// ---------------------------------------------------------------------------
 async function pollForPrice(state, startedAt) {
   if (state.done) return;
   state.pollCount = (state.pollCount || 0) + 1;
@@ -308,36 +254,50 @@ async function pollForPrice(state, startedAt) {
   try {
     const r = await chrome.scripting.executeScript({
       target: { tabId: state.tabId },
-      func: readPriceFromPage,
-      args: [state.targetBlockId],
+      func: detectMobileOffer,
       world: "MAIN"
     });
     result = r && r[0] && r[0].result;
-    if (result && result.diag) state.lastDiag = result.diag;
   } catch (e) {
     lastErr = e && e.message ? e.message : String(e);
     // strona moze jeszcze nie byc gotowa do wstrzykniecia — sprobujemy znow
   }
   state.lastPollErr = lastErr;
 
-  if (result && result.price) { state.resolve(result); return; }
+  if (result) {
+    // Wykryto oferte mobilna -> sukces od razu.
+    if (result.mobileOffer === true) {
+      try {
+        console.warn("[Cena mobilna] OK: oferta mobilna ZNALEZIONA (via " +
+          (result.via || "?") + "), proby=" + state.pollCount);
+      } catch (e) {}
+      state.resolve({ mobileOffer: true, via: result.via });
+      return;
+    }
+    // Brak oferty, ale strona ZALADOWANA (sa pokoje/ceny) -> pewna odpowiedz "nie ma".
+    if (result.loaded === true) {
+      try {
+        console.warn("[Cena mobilna] OK: brak oferty mobilnej (strona zaladowana), proby=" + state.pollCount);
+      } catch (e) {}
+      state.resolve({ mobileOffer: false });
+      return;
+    }
+    // result.loaded === false -> strona jeszcze sie laduje, ponawiamy ponizej.
+  }
 
   if (Date.now() - startedAt >= POLL_DEADLINE_MS) {
-    // Pelna diagnostyka -> konsola rozszerzenia (chrome://extensions -> bledy).
-    // Do uzytkownika trafia tylko czysty kod bledu (content.js pokaze ludzki tekst).
-    let diag = "proby=" + state.pollCount + (lastErr ? (", inject-err=" + lastErr) : "");
-    if (state.lastDiag) {
-      const d = state.lastDiag;
-      diag += " | wierszy=" + d.rows + ", spans=" + d.spans + ", mobUA=" + d.isMobileUA + ", captcha=" + d.captcha;
-      diag += ", tytul='" + (d.title || "") + "'";
-      if (d.money && d.money.length) {
-        diag += " | kwoty: " + d.money.map((m) => m.txt + "(" + m.tag + "." + m.cls + ")").join(" ; ");
-      } else {
-        diag += " | brak kwot na stronie";
-      }
+    // Deadline: jezeli ostatni odczyt mowil "brak oferty" (choc loaded=false),
+    // bezpieczniej zwrocic "nie ma" niz blad — ale logujemy do diagnostyki.
+    try {
+      console.warn("[Cena mobilna] deadline: proby=" + state.pollCount +
+        (lastErr ? (", inject-err=" + lastErr) : "") +
+        ", ostatni=" + JSON.stringify(result || null));
+    } catch (e) {}
+    if (result && result.mobileOffer === false) {
+      state.resolve({ mobileOffer: false });
+    } else {
+      state.reject(new Error("not-loaded"));
     }
-    try { console.warn("[Cena mobilna] price-not-found:", diag); } catch (e) {}
-    state.reject(new Error("price-not-found"));
     return;
   }
   state.pollTimer = setTimeout(() => pollForPrice(state, startedAt), POLL_MS);
@@ -366,7 +326,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === "CHECK_MOBILE_PRICE") {
-    probeMobilePrice(msg.url, msg.targetBlockId)
+    probeMobilePrice(msg.url)
       .then((data) => sendResponse({ ok: true, data }))
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true;

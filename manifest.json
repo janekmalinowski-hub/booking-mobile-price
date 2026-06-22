@@ -1,11 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Cena mobilna na Booking",
-  "version": "1.0.0",
-  "version_name": "1.0 (zweryfikowane na booking.com, Gdansk)",
+  "version": "1.1.0",
+  "version_name": "1.1 (wykrywanie oferty mobilnej)",
   "description": "Sprawdza, czy ta sama oferta na Booking.com ma nizsza cene dla urzadzen mobilnych, i pokazuje roznice bezposrednio na stronie. Rozroznia sesje zalogowana (z Genius) i niezalogowana.",
   "author": "Jan Malinowski",
-  "homepage_url": "https://github.com/janekmalinowski-hub",
   "permissions": [
     "declarativeNetRequest",
     "tabs",
